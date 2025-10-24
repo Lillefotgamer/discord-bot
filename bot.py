@@ -156,13 +156,16 @@ async def gamble(ctx, amount: int, color: str):
 
     result = random.choice(["red", "black"])
     if color == result:
-        win_amount = amount  # Gain = bet amount, effectively doubling
-        current_points += win_amount
+        # Win: double your bet
+        current_points += amount  # Only add the same amount, total gain = bet amount
         user_points[user_id] = current_points
         save_points()
-        await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You won **{win_amount}** points! Total: **{current_points}**")
+        await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You won **{amount}** points! Total: **{current_points}**")
     else:
+        # Lose: subtract the bet
         current_points -= amount
+        if current_points < 0:
+            current_points = 0
         user_points[user_id] = current_points
         save_points()
         await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You lost **{amount}** points! Total: **{current_points}**")
@@ -171,3 +174,4 @@ async def gamble(ctx, amount: int, color: str):
 
 # --- Run Bot ---
 bot.run(TOKEN)
+
