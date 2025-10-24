@@ -8,7 +8,7 @@ from threading import Thread
 import os
 
 # --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")  # Use Render environment variable
+TOKEN = os.getenv("DISCORD_TOKEN")  # Use environment variable for security
 CHANNEL_ID = 1431309661461680260  # Replace with your channel ID
 
 ADD_TRIGGER = "Part Factory Tycoon Is Good"
@@ -114,7 +114,9 @@ async def on_message(message: discord.Message):
         await check_roles(message.author, current_points)
         save_points()
 
-    await bot.process_commands(message)
+    # Only process commands that start with the prefix
+    if message.content.startswith(bot.command_prefix):
+        await bot.process_commands(message)
 
 # --- Commands ---
 @bot.command()
@@ -156,8 +158,8 @@ async def gamble(ctx, amount: int, color: str):
 
     result = random.choice(["red", "black"])
     if color == result:
-        # Win: double your bet
-        current_points += amount  # Only add the same amount, total gain = bet amount
+        # Win: add exactly the bet amount (effectively doubling)
+        current_points += amount
         user_points[user_id] = current_points
         save_points()
         await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You won **{amount}** points! Total: **{current_points}**")
@@ -171,6 +173,22 @@ async def gamble(ctx, amount: int, color: str):
         await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You lost **{amount}** points! Total: **{current_points}**")
 
     await check_roles(ctx.author, current_points)
+
+# --- Admin command to reset a user ---
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def reset(ctx, member: discord.Member):
+    user_id = str(member.id)
+    user_points[user_id] = 0
+    daily_data[user_id] = None
+    save_points()
+    save_daily()
+    await ctx.send(f"🛠️ {ctx.author.mention} reset points and daily for {member.mention}.")
+
+@reset.error
+async def reset_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(f"❌ {ctx.author.mention}, you need Administrator permissions to use this command.")
 
 # --- Run Bot ---
 bot.run(TOKEN)
