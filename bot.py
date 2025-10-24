@@ -162,4 +162,18 @@ async def gamble(ctx, amount: int, choice: str):
     await check_roles(ctx.author, current_points)
 
 # --- Run bot ---
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+Thread(target=run).start()
 bot.run(TOKEN)
+
