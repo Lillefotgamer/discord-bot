@@ -248,6 +248,3 @@ async def on_guild_join(guild):
 
 # ================= RUN BOT =================
 bot.run(TOKEN)
-
-
-
