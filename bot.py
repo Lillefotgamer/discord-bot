@@ -1,189 +1,227 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands, tasks
 import json
 import os
 from datetime import datetime, timedelta
+from flask import Flask
+import asyncio
 
-# --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")  # Put your token in Render environment variable
+# --- CONFIG ---
+TOKEN = os.getenv("DISCORD_TOKEN")  # Use Render Environment Variable
+POINTS_FILE = "points.json"
+DAILY_FILE = "daily.json"
 
-# Default values (can be changed with admin commands)
-CONFIG = {
-    "ADD_TRIGGER": "Part Factory Tycoon Is Good",
-    "REMOVE_TRIGGER": "Part Factory Tycoon Is Bad",
+# Defaults
+config = {
+    "ADD_TRIGGER": "part factory tycoon is good",
+    "REMOVE_TRIGGER": "part factory tycoon is bad",
     "ADD_AMOUNT": 1,
     "REMOVE_AMOUNT": 1,
     "DAILY_REWARD": 10,
     "DAILY_COOLDOWN_HOURS": 24,
-    "CHANNEL_ID": None
+    "CHANNEL_ID": None  # Must be set via admin
 }
 
-ROLES = {}  # milestone points: role name
-POINTS_FILE = "points.json"
-DAILY_FILE = "daily.json"
+ROLES = {}  # milestone: role_name
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
-
-# Load points and daily data
+# Load data
 if os.path.exists(POINTS_FILE):
-    with open(POINTS_FILE) as f:
+    with open(POINTS_FILE, "r") as f:
         user_points = json.load(f)
 else:
     user_points = {}
 
 if os.path.exists(DAILY_FILE):
-    with open(DAILY_FILE) as f:
-        daily_data = json.load(f)
+    with open(DAILY_FILE, "r") as f:
+        daily_claims = json.load(f)
 else:
-    daily_data = {}
+    daily_claims = {}
 
-# Helper functions
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
+
+# Flask to keep alive on Render
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
 def save_points():
     with open(POINTS_FILE, "w") as f:
         json.dump(user_points, f)
 
 def save_daily():
     with open(DAILY_FILE, "w") as f:
-        json.dump(daily_data, f)
+        json.dump(daily_claims, f)
 
-async def check_roles(member: discord.Member):
-    points = user_points.get(str(member.id), 0)
+async def check_roles(member: discord.Member, points: int):
+    """Assign roles based on milestone"""
     for milestone, role_name in ROLES.items():
-        role = discord.utils.get(member.guild.roles, name=role_name)
-        if role and points >= milestone and role not in member.roles:
-            await member.add_roles(role)
-            try:
-                await member.send(f"🎉 Congratulations! You reached {milestone} points and got the role **{role.name}**!")
-            except:
-                pass
+        if points >= milestone:
+            role = discord.utils.get(member.guild.roles, name=role_name)
+            if role and role not in member.roles:
+                await member.add_roles(role)
+                await member.send(f"🎉 You reached {milestone} points! You got role **{role.name}**!")
 
-# Slash commands
-@tree.command(name="points", description="Check your current points")
-async def points(interaction: discord.Interaction):
+# ---------------- Commands ---------------- #
+
+@tree.command(name="points", description="Check your points")
+async def points_cmd(interaction: discord.Interaction):
     pts = user_points.get(str(interaction.user.id), 0)
     await interaction.response.send_message(f"🏅 {interaction.user.mention}, you have **{pts}** points.")
 
 @tree.command(name="daily", description="Claim your daily reward")
-async def daily(interaction: discord.Interaction):
+async def daily_cmd(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
     now = datetime.utcnow()
-    last_claim_str = daily_data.get(str(interaction.user.id))
-    if last_claim_str:
-        last_claim = datetime.fromisoformat(last_claim_str)
-        remaining = timedelta(hours=CONFIG["DAILY_COOLDOWN_HOURS"]) - (now - last_claim)
-        if remaining.total_seconds() > 0:
+    last_claim = daily_claims.get(user_id)
+    cooldown = timedelta(hours=config["DAILY_COOLDOWN_HOURS"])
+    if last_claim:
+        last_claim_time = datetime.fromisoformat(last_claim)
+        if now - last_claim_time < cooldown:
+            remaining = cooldown - (now - last_claim_time)
             hours, remainder = divmod(int(remaining.total_seconds()), 3600)
-            minutes = remainder // 60
-            return await interaction.response.send_message(
-                f"⏳ You have already claimed your daily. Try again in {hours}h {minutes}m."
+            minutes, _ = divmod(remainder, 60)
+            await interaction.response.send_message(
+                f"⏳ You can claim daily again in {hours}h {minutes}m."
             )
+            return
+
     # Give daily
-    user_points[str(interaction.user.id)] = user_points.get(str(interaction.user.id), 0) + CONFIG["DAILY_REWARD"]
-    daily_data[str(interaction.user.id)] = now.isoformat()
+    user_points[user_id] = user_points.get(user_id, 0) + config["DAILY_REWARD"]
+    daily_claims[user_id] = now.isoformat()
     save_points()
     save_daily()
-    await check_roles(interaction.user)
+    await check_roles(interaction.user, user_points[user_id])
     await interaction.response.send_message(
-        f"🎉 {interaction.user.mention}, you claimed your daily reward of {CONFIG['DAILY_REWARD']} points! Total: **{user_points[str(interaction.user.id)]}**"
+        f"🎉 {interaction.user.mention}, you claimed your daily reward of {config['DAILY_REWARD']} points! Total: **{user_points[user_id]}**"
     )
 
-@tree.command(name="gamble", description="Gamble your points. Usage: /gamble amount color")
-@app_commands.describe(amount="Amount of points to gamble", color="Red or Black")
+@tree.command(name="gamble", description="Gamble points on red/black")
+@app_commands.describe(amount="Amount of points to gamble", color="red or black")
 async def gamble(interaction: discord.Interaction, amount: int, color: str):
-    color = color.lower()
-    if amount <= 0:
-        return await interaction.response.send_message("❌ You must gamble at least 1 point.")
     user_id = str(interaction.user.id)
-    current_points = user_points.get(user_id, 0)
-    if current_points < amount:
-        return await interaction.response.send_message("❌ You don't have enough points.")
+    pts = user_points.get(user_id, 0)
+    if amount > pts:
+        await interaction.response.send_message(f"❌ You don't have that many points.")
+        return
+    if color.lower() not in ["red", "black"]:
+        await interaction.response.send_message("❌ Color must be red or black.")
+        return
+
     import random
     win_color = random.choice(["red", "black"])
-    if color == win_color:
-        current_points += amount
-        user_points[user_id] = current_points
-        result = f"🎉 You won! The color was {win_color}. You gain {amount} points! Total: **{current_points}**"
+    if color.lower() == win_color:
+        user_points[user_id] += amount
+        await interaction.response.send_message(
+            f"🎉 You won! The color was {win_color}. You gain {amount} points! Total: **{user_points[user_id]}**"
+        )
     else:
-        current_points -= amount
-        user_points[user_id] = current_points
-        result = f"💀 You lost! The color was {win_color}. You lose {amount} points! Total: **{current_points}**"
+        user_points[user_id] -= amount
+        await interaction.response.send_message(
+            f"💀 You lost! The color was {win_color}. You lose {amount} points! Total: **{user_points[user_id]}**"
+        )
     save_points()
-    await check_roles(interaction.user)
-    await interaction.response.send_message(result)
+    await check_roles(interaction.user, user_points[user_id])
 
-# Admin-only commands
-def is_admin(interaction):
+# ---------------- Admin Commands ---------------- #
+
+def is_admin(interaction: discord.Interaction):
     return interaction.user.guild_permissions.administrator
 
-@tree.command(name="reset", description="Reset a user's points (admin only)")
-@app_commands.describe(user="User to reset points")
-async def reset(interaction: discord.Interaction, user: discord.Member):
+@tree.command(name="reset", description="Reset a user's points (Admin)")
+@app_commands.describe(user="User to reset")
+async def reset_cmd(interaction: discord.Interaction, user: discord.Member):
     if not is_admin(interaction):
-        return await interaction.response.send_message("❌ You need administrator to do this.")
+        await interaction.response.send_message("❌ You must be an administrator.")
+        return
     user_points[str(user.id)] = 0
     save_points()
     await interaction.response.send_message(f"✅ {user.mention}'s points have been reset.")
 
-@tree.command(name="setconfig", description="Change a config option (admin only)")
-@app_commands.describe(option="Option name", value="New value")
-async def setconfig(interaction: discord.Interaction, option: str, value: str):
+@tree.command(name="setconfig", description="Change config value (Admin)")
+@app_commands.describe(option="Config option", value="New value")
+async def setconfig_cmd(interaction: discord.Interaction, option: str, value: str):
     if not is_admin(interaction):
-        return await interaction.response.send_message("❌ You need administrator to do this.")
-    option = option.upper()
-    if option not in CONFIG:
-        return await interaction.response.send_message(f"❌ Unknown config option: {option}")
-    # Try to convert value to int if possible
-    try:
-        CONFIG[option] = int(value)
-    except:
-        CONFIG[option] = value
-    await interaction.response.send_message(f"✅ Config `{option}` set to `{CONFIG[option]}`.")
+        await interaction.response.send_message("❌ You must be an administrator.")
+        return
+    if option not in config:
+        await interaction.response.send_message("❌ Invalid config option.")
+        return
+    # Convert numbers to int if possible
+    if option in ["ADD_AMOUNT", "REMOVE_AMOUNT", "DAILY_REWARD", "DAILY_COOLDOWN_HOURS"]:
+        value = int(value)
+    config[option] = value
+    await interaction.response.send_message(f"✅ Config {option} set to {value}.")
 
-@tree.command(name="addrole", description="Add a role milestone (admin only)")
-@app_commands.describe(points="Points required", role_name="Role name")
-async def addrole(interaction: discord.Interaction, points: int, role_name: str):
+@tree.command(name="addrole", description="Add a role milestone (Admin)")
+@app_commands.describe(points="Points required", role_name="Role to give")
+async def addrole_cmd(interaction: discord.Interaction, points: int, role_name: str):
     if not is_admin(interaction):
-        return await interaction.response.send_message("❌ You need administrator to do this.")
+        await interaction.response.send_message("❌ You must be an administrator.")
+        return
     ROLES[points] = role_name
-    await interaction.response.send_message(f"✅ Added role milestone: {points} → {role_name}")
+    await interaction.response.send_message(f"✅ Added role milestone: {role_name} at {points} points.")
 
-@tree.command(name="removerole", description="Remove a role milestone (admin only)")
-@app_commands.describe(points="Points of the role milestone to remove")
-async def removerole(interaction: discord.Interaction, points: int):
+@tree.command(name="removerole", description="Remove a role milestone (Admin)")
+@app_commands.describe(points="Milestone points")
+async def removerole_cmd(interaction: discord.Interaction, points: int):
     if not is_admin(interaction):
-        return await interaction.response.send_message("❌ You need administrator to do this.")
+        await interaction.response.send_message("❌ You must be an administrator.")
+        return
     if points in ROLES:
         del ROLES[points]
-        await interaction.response.send_message(f"✅ Removed role milestone for {points} points")
+        await interaction.response.send_message(f"✅ Removed role milestone for {points} points.")
     else:
-        await interaction.response.send_message("❌ No such role milestone.")
+        await interaction.response.send_message("❌ That milestone doesn't exist.")
 
-# Help command
-@tree.command(name="help", description="Show all commands")
+@tree.command(name="setbot", description="Change bot username/avatar (Admin)")
+@app_commands.describe(name="New bot username", avatar_url="Avatar URL")
+async def setbot_cmd(interaction: discord.Interaction, name: str = None, avatar_url: str = None):
+    if not is_admin(interaction):
+        await interaction.response.send_message("❌ You must be an administrator.")
+        return
+    if name:
+        await bot.user.edit(username=name)
+    if avatar_url:
+        import aiohttp, io, base64
+        async with aiohttp.ClientSession() as session:
+            async with session.get(avatar_url) as resp:
+                img = await resp.read()
+                await bot.user.edit(avatar=img)
+    await interaction.response.send_message("✅ Bot identity updated.")
+
+# ---------------- Help Command ---------------- #
+@tree.command(name="help", description="Show commands")
 async def help_cmd(interaction: discord.Interaction):
-    admin = is_admin(interaction)
-    embed = discord.Embed(title="Commands", color=discord.Color.blue())
-    embed.add_field(name="/points", value="Check your current points", inline=False)
-    embed.add_field(name="/daily", value=f"Claim your daily reward ({CONFIG['DAILY_REWARD']} points)", inline=False)
-    embed.add_field(name="/gamble", value="Gamble your points. Example: /gamble amount color", inline=False)
-    if admin:
-        embed.add_field(name="/reset", value="Reset a user's points", inline=False)
-        embed.add_field(name="/setconfig", value="Change a config option", inline=False)
-        embed.add_field(name="/addrole", value="Add a role milestone", inline=False)
-        embed.add_field(name="/removerole", value="Remove a role milestone", inline=False)
-    await interaction.response.send_message(embed=embed)
+    user_admin = is_admin(interaction)
+    help_text = "**User Commands:**\n"
+    help_text += "/points - Check your points\n"
+    help_text += "/daily - Claim daily reward\n"
+    help_text += "/gamble <amount> <color> - Gamble points\n"
+    if user_admin:
+        help_text += "\n**Admin Commands:**\n"
+        help_text += "/reset <user>\n"
+        help_text += "/setconfig <option> <value>\n"
+        help_text += "/addrole <points> <role_name>\n"
+        help_text += "/removerole <points>\n"
+        help_text += "/setbot [name] [avatar_url]\n"
+    await interaction.response.send_message(help_text)
 
-# Run bot
+# ---------------- Run ---------------- #
 @bot.event
 async def on_ready():
-    await tree.sync()
     print(f"✅ Logged in as {bot.user}")
+    try:
+        synced = await tree.sync()
+        print(f"Synced {len(synced)} commands.")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
 
+bot.loop.create_task(asyncio.to_thread(app.run, "0.0.0.0", 8080))
 bot.run(TOKEN)
-
