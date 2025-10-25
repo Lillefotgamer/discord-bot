@@ -4,28 +4,35 @@ import json, os, random
 from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
+import aiohttp
 
-# --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")  # Set in Render environment
-CHANNEL_ID = 1431309661461680260
-ADD_TRIGGER = "part factory tycoon is good"
-REMOVE_TRIGGER = "part factory tycoon is bad"
-ADD_AMOUNT = 1
-REMOVE_AMOUNT = 99
-DAILY_REWARD = 10
-DAILY_COOLDOWN_HOURS = 24
+# --- FILES ---
+POINTS_FILE = "points.json"
+CONFIG_FILE = "config.json"
+TOKEN = "YOUR_BOT_TOKEN_HERE"  # replace with your token
 
-ROLES = {
-    25: "Cool Role 🔥",
-    100: "Cooler Role 🔥🔥",
-    250: "Coolest Role 🔥🔥🔥"
+# --- DEFAULT CONFIG ---
+default_config = {
+    "ADD_TRIGGER": "part factory tycoon is good",
+    "REMOVE_TRIGGER": "part factory tycoon is bad",
+    "ADD_AMOUNT": 1,
+    "REMOVE_AMOUNT": 99,
+    "DAILY_REWARD": 10,
+    "DAILY_COOLDOWN_HOURS": 24,
+    "ROLES": {},
+    "CHANNEL_ID": None,  # Must be set manually
+    "BOT_NAME": None,    # Defaults to current Discord username
+    "BOT_AVATAR": None   # Defaults to current Discord avatar
 }
 
-# --- FILE SETUP ---
-POINTS_FILE = "points.json"
+# --- INIT FILES ---
 if not os.path.exists(POINTS_FILE):
     with open(POINTS_FILE, "w") as f:
         json.dump({}, f)
+
+if not os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(default_config, f, indent=2)
 
 def load_points():
     with open(POINTS_FILE, "r") as f:
@@ -35,7 +42,16 @@ def save_points(data):
     with open(POINTS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+def save_config(data):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
 user_points = load_points()
+config = load_config()
 
 # --- DISCORD SETUP ---
 intents = discord.Intents.default()
@@ -43,7 +59,7 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- FLASK SERVER FOR KEEP-ALIVE ---
+# --- FLASK SERVER ---
 app = Flask("")
 @app.route("/")
 def home():
@@ -56,9 +72,15 @@ Thread(target=run_flask).start()
 
 # --- HELPERS ---
 def get_daily_cooldown(last_claim):
+    if not last_claim:
+        return None
     now = datetime.utcnow()
-    elapsed = now - datetime.fromisoformat(last_claim)
-    remaining = timedelta(hours=DAILY_COOLDOWN_HOURS) - elapsed
+    try:
+        last_time = datetime.fromisoformat(last_claim)
+    except ValueError:
+        return None
+    elapsed = now - last_time
+    remaining = timedelta(hours=config["DAILY_COOLDOWN_HOURS"]) - elapsed
     if remaining.total_seconds() <= 0:
         return None
     hours, remainder = divmod(int(remaining.total_seconds()), 3600)
@@ -66,7 +88,8 @@ def get_daily_cooldown(last_claim):
     return f"{hours}h {minutes}m"
 
 async def check_roles(member, points_amount):
-    for milestone, role_name in ROLES.items():
+    for milestone_str, role_name in config["ROLES"].items():
+        milestone = int(milestone_str)
         role = discord.utils.get(member.guild.roles, name=role_name)
         if role and points_amount >= milestone and role not in member.roles:
             await member.add_roles(role)
@@ -76,30 +99,46 @@ async def check_roles(member, points_amount):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    # Apply bot name/avatar if configured
+    if config.get("BOT_NAME") and bot.user.name != config["BOT_NAME"]:
+        await bot.user.edit(username=config["BOT_NAME"])
+    if config.get("BOT_AVATAR"):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(config["BOT_AVATAR"]) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    await bot.user.edit(avatar=data)
 
 @bot.event
 async def on_message(message):
-    if message.author.bot or message.channel.id != CHANNEL_ID:
+    if message.author.bot:
         return
 
-    user_id = str(message.author.id)
-    user_points.setdefault(user_id, {"points": 0, "last_daily": None})
+    # Check if CHANNEL_ID is set
+    channel_id = config.get("CHANNEL_ID")
+    if not channel_id:
+        return  # No channel set, ignore all messages
+
+    if message.channel.id != channel_id:
+        return
+
+    uid = str(message.author.id)
+    user_points.setdefault(uid, {"points": 0, "last_daily": None})
     changed = False
     text = message.content.lower()
 
-    if text == ADD_TRIGGER:
-        user_points[user_id]["points"] += ADD_AMOUNT
-        await message.channel.send(f"🎉 {message.author.mention} gained {ADD_AMOUNT} point(s)! Total: **{user_points[user_id]['points']}**")
+    if text == config["ADD_TRIGGER"].lower():
+        user_points[uid]["points"] += config["ADD_AMOUNT"]
+        await message.channel.send(f"🎉 {message.author.mention} gained {config['ADD_AMOUNT']} point(s)! Total: **{user_points[uid]['points']}**")
         changed = True
-
-    elif text == REMOVE_TRIGGER:
-        user_points[user_id]["points"] = max(0, user_points[user_id]["points"] - REMOVE_AMOUNT)
-        await message.channel.send(f"💀 {message.author.mention} lost {REMOVE_AMOUNT} points! Total: **{user_points[user_id]['points']}**")
+    elif text == config["REMOVE_TRIGGER"].lower():
+        user_points[uid]["points"] = max(0, user_points[uid]["points"] - config["REMOVE_AMOUNT"])
+        await message.channel.send(f"💀 {message.author.mention} lost {config['REMOVE_AMOUNT']} points! Total: **{user_points[uid]['points']}**")
         changed = True
 
     if changed:
         save_points(user_points)
-        await check_roles(message.author, user_points[user_id]["points"])
+        await check_roles(message.author, user_points[uid]["points"])
 
     await bot.process_commands(message)
 
@@ -116,15 +155,14 @@ async def daily(ctx):
     user_points.setdefault(uid, {"points": 0, "last_daily": None})
     last_claim = user_points[uid]["last_daily"]
 
-    if last_claim:
-        remaining = get_daily_cooldown(last_claim)
-        if remaining:
-            return await ctx.send(f"🕒 {ctx.author.mention}, you already claimed your daily reward! Try again in **{remaining}**.")
+    remaining = get_daily_cooldown(last_claim)
+    if remaining:
+        return await ctx.send(f"🕒 {ctx.author.mention}, you already claimed your daily reward! Try again in **{remaining}**.")
 
-    user_points[uid]["points"] += DAILY_REWARD
+    user_points[uid]["points"] += config["DAILY_REWARD"]
     user_points[uid]["last_daily"] = datetime.utcnow().isoformat()
     save_points(user_points)
-    await ctx.send(f"🎉 {ctx.author.mention}, you claimed your daily reward of {DAILY_REWARD} points! Total: **{user_points[uid]['points']}**")
+    await ctx.send(f"🎉 {ctx.author.mention}, you claimed your daily reward of {config['DAILY_REWARD']} points! Total: **{user_points[uid]['points']}**")
 
 @bot.command()
 async def gamble(ctx, amount: int, color: str):
@@ -146,9 +184,9 @@ async def gamble(ctx, amount: int, color: str):
     else:
         user_points[uid]["points"] -= amount
         await ctx.send(f"❌ You lost! The color was **{result}**. You lose {amount} point(s)! Total: **{user_points[uid]['points']}**")
-
     save_points(user_points)
 
+# --- ADMIN COMMANDS ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def reset(ctx, member: discord.Member):
@@ -157,25 +195,53 @@ async def reset(ctx, member: discord.Member):
     save_points(user_points)
     await ctx.send(f"🧹 {member.mention}'s points have been reset to 0.")
 
-@reset.error
-async def reset_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("🚫 You don’t have permission to use this command.")
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setconfig(ctx, option: str, *, value):
+    option = option.upper()
+    if option not in config:
+        return await ctx.send(f"❌ Invalid option. Options: {', '.join(config.keys())}")
+
+    if option in ["ADD_AMOUNT","REMOVE_AMOUNT","DAILY_REWARD","DAILY_COOLDOWN_HOURS","CHANNEL_ID"]:
+        try: value = int(value)
+        except: return await ctx.send("❌ Value must be a number.")
+
+    config[option] = value
+    save_config(config)
+    await ctx.send(f"✅ Config `{option}` updated to `{value}`")
 
 @bot.command()
-async def leaderboard(ctx):
-    if not user_points:
-        return await ctx.send("📉 Nobody has any points yet!")
+@commands.has_permissions(administrator=True)
+async def setbot(ctx, name: str = None, avatar_url: str = None):
+    if name:
+        await bot.user.edit(username=name)
+        config["BOT_NAME"] = name
+    if avatar_url:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(avatar_url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    await bot.user.edit(avatar=data)
+                    config["BOT_AVATAR"] = avatar_url
+    save_config(config)
+    await ctx.send("✅ Bot identity updated successfully.")
 
-    top_users = sorted(user_points.items(), key=lambda x: x[1]["points"], reverse=True)[:10]
-    description = ""
-    for i, (uid, data) in enumerate(top_users, start=1):
-        user = await bot.fetch_user(int(uid))
-        medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}️⃣"
-        description += f"{medal} **{user.name}** — {data['points']} points\n"
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def addrole(ctx, points: int, *, role_name: str):
+    config["ROLES"][str(points)] = role_name
+    save_config(config)
+    await ctx.send(f"✅ Added role milestone: {points} points → {role_name}")
 
-    embed = discord.Embed(title="🏆 Leaderboard (Top 10)", description=description, color=discord.Color.gold())
-    await ctx.send(embed=embed)
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def removerole(ctx, points: int):
+    if str(points) in config["ROLES"]:
+        role = config["ROLES"].pop(str(points))
+        save_config(config)
+        await ctx.send(f"🗑 Removed role milestone: {points} → {role}")
+    else:
+        await ctx.send("❌ No such milestone found.")
 
-# --- RUN ---
 bot.run(TOKEN)
+
