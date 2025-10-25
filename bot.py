@@ -1,29 +1,8 @@
 import discord
 from discord.ext import commands
-import json
-from datetime import datetime
-import random
+import json, random, datetime, os
 from flask import Flask
 from threading import Thread
-import os
-
-# --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")  # Use environment variable for security
-CHANNEL_ID = 1431309661461680260  # Replace with your channel ID
-
-ADD_TRIGGER = "Part Factory Tycoon Is Good"
-REMOVE_TRIGGER = "Part Factory Tycoon Is Bad"
-ADD_AMOUNT = 1
-REMOVE_AMOUNT = 99
-
-DAILY_AMOUNT = 10  # Daily reward
-
-ROLES = {
-    25: "Cool Role 🔥",
-    100: "Cooler Role 🔥🔥",
-    250: "Coolest Role 🔥🔥🔥"
-}
-# ----------------------
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -33,163 +12,144 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Load points
-if os.path.exists("points.json"):
-    with open("points.json", "r") as f:
-        user_points = json.load(f)
-else:
-    user_points = {}
+POINTS_FILE = "points.json"
+DAILY_FILE = "daily.json"
 
-# Load daily
-if os.path.exists("daily.json"):
-    with open("daily.json", "r") as f:
-        daily_data = json.load(f)
-else:
-    daily_data = {}
+def load_json(filename):
+    if not os.path.exists(filename):
+        with open(filename, "w") as f:
+            json.dump({}, f)
+    with open(filename, "r") as f:
+        return json.load(f)
 
-# --- Flask server to stay online ---
-app = Flask('')
+def save_json(filename, data):
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=4)
 
-@app.route('/')
+points = load_json(POINTS_FILE)
+daily = load_json(DAILY_FILE)
+
+# Flask keep-alive (Render/UptimeRobot)
+app = Flask(__name__)
+
+@app.route("/")
 def home():
     return "Bot is alive!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    app.run(host="0.0.0.0", port=8080)
 
-Thread(target=run).start()
+def keep_alive():
+    t = Thread(target=run)
+    t.daemon = True
+    t.start()
 
-# --- Helper Functions ---
-async def check_roles(member: discord.Member, points: int):
-    guild = member.guild
-    for milestone, role_name in ROLES.items():
-        if points >= milestone:
-            role = discord.utils.get(guild.roles, name=role_name)
-            if role and role not in member.roles:
-                await member.add_roles(role)
-                await member.send(f"🎉 Congratulations! You reached {milestone} points and got the role **{role.name}**!")
-
-def save_points():
-    with open("points.json", "w") as f:
-        json.dump(user_points, f)
-
-def save_daily():
-    with open("daily.json", "w") as f:
-        json.dump(daily_data, f)
-
-# --- Events ---
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
 @bot.event
-async def on_message(message: discord.Message):
+async def on_message(message):
     if message.author.bot:
         return
-    if message.channel.id != CHANNEL_ID:
-        return
 
+    msg = message.content.lower()
     user_id = str(message.author.id)
-    current_points = user_points.get(user_id, 0)
-    changed = False
-    content_lower = message.content.lower()
+    if user_id not in points:
+        points[user_id] = 0
 
-    # Add points
-    if content_lower == ADD_TRIGGER.lower():
-        current_points += ADD_AMOUNT
-        user_points[user_id] = current_points
-        await message.channel.send(f"🎉 {message.author.mention} gained {ADD_AMOUNT} points! Total: **{current_points}**")
-        changed = True
+    # Gain/loss system
+    if "part factory tycoon is good" in msg:
+        points[user_id] += 1
+        await message.channel.send(f"🎉 {message.author.mention} gained 1 point! Total: **{points[user_id]}**")
+    elif "part factory tycoon is bad" in msg:
+        points[user_id] = max(0, points[user_id] - 99)
+        await message.channel.send(f"💀 {message.author.mention} lost 99 points! Total: **{points[user_id]}**")
 
-    # Remove points
-    elif content_lower == REMOVE_TRIGGER.lower():
-        current_points -= REMOVE_AMOUNT
-        if current_points < 0:
-            current_points = 0
-        user_points[user_id] = current_points
-        await message.channel.send(f"💀 {message.author.mention} lost {REMOVE_AMOUNT} points! Total: **{current_points}**")
-        changed = True
+    save_json(POINTS_FILE, points)
+    await bot.process_commands(message)
 
-    if changed:
-        await check_roles(message.author, current_points)
-        save_points()
-
-    # Only process commands that start with the prefix
-    if message.content.startswith(bot.command_prefix):
-        await bot.process_commands(message)
-
-# --- Commands ---
 @bot.command()
-async def points(ctx):
-    pts = user_points.get(str(ctx.author.id), 0)
-    await ctx.send(f"🏅 {ctx.author.mention}, you have **{pts}** points.")
+async def pointscheck(ctx):
+    user_id = str(ctx.author.id)
+    total = points.get(user_id, 0)
+    await ctx.send(f"💰 {ctx.author.mention}, you have **{total}** points.")
 
 @bot.command()
 async def daily(ctx):
     user_id = str(ctx.author.id)
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    now = datetime.datetime.utcnow()
+    last_claim = daily.get(user_id)
 
-    last_claim = daily_data.get(user_id)
-    if last_claim == today:
-        await ctx.send(f"⏳ {ctx.author.mention}, you already claimed your daily reward today!")
-        return
+    if last_claim:
+        elapsed = (now - datetime.datetime.fromisoformat(last_claim)).total_seconds()
+        if elapsed < 86400:  # 24 hours
+            remaining = 86400 - elapsed
+            hours = int(remaining // 3600)
+            minutes = int((remaining % 3600) // 60)
+            seconds = int(remaining % 60)
+            await ctx.send(
+                f"🕒 {ctx.author.mention}, you already claimed your daily! "
+                f"Try again in **{hours}h {minutes}m {seconds}s**."
+            )
+            return
 
-    current_points = user_points.get(user_id, 0) + DAILY_AMOUNT
-    user_points[user_id] = current_points
-    daily_data[user_id] = today
-    save_points()
-    save_daily()
-    await ctx.send(f"🎉 {ctx.author.mention}, you claimed your daily reward of {DAILY_AMOUNT} points! Total: **{current_points}**")
-    await check_roles(ctx.author, current_points)
+    points[user_id] = points.get(user_id, 0) + 10
+    daily[user_id] = now.isoformat()
+    save_json(POINTS_FILE, points)
+    save_json(DAILY_FILE, daily)
+    await ctx.send(f"🎉 {ctx.author.mention}, you claimed your daily reward of 10 points! Total: **{points[user_id]}**")
 
 @bot.command()
-async def gamble(ctx, amount: int, color: str):
+async def gamble(ctx, amount: int, color: str = None):
     user_id = str(ctx.author.id)
-    current_points = user_points.get(user_id, 0)
-
-    if amount > current_points or amount <= 0:
-        await ctx.send(f"💀 {ctx.author.mention}, you can't gamble that amount!")
+    if points.get(user_id, 0) < amount:
+        await ctx.send(f"🚫 {ctx.author.mention}, you don’t have enough points to gamble that amount!")
         return
 
-    color = color.lower()
-    if color not in ["red", "black"]:
-        await ctx.send("⚠️ You must choose 'red' or 'black'.")
-        return
-
-    result = random.choice(["red", "black"])
-    if color == result:
-        # Win: add exactly the bet amount (effectively doubling)
-        current_points += amount
-        user_points[user_id] = current_points
-        save_points()
-        await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You won **{amount}** points! Total: **{current_points}**")
+    color = color.lower() if color else random.choice(["red", "black"])
+    outcome = random.choice(["red", "black"])
+    if outcome == color:
+        points[user_id] += amount  # win = +amount
+        await ctx.send(f"🎉 You won! The color was {outcome}. You gain {amount} point(s)! Total: **{points[user_id]}**")
     else:
-        # Lose: subtract the bet
-        current_points -= amount
-        if current_points < 0:
-            current_points = 0
-        user_points[user_id] = current_points
-        save_points()
-        await ctx.send(f"🎲 {ctx.author.mention}, the result was **{result}**! You lost **{amount}** points! Total: **{current_points}**")
+        points[user_id] = max(0, points[user_id] - amount)
+        await ctx.send(f"❌ You lost! The color was {outcome}. You lose {amount} point(s)! Total: **{points[user_id]}**")
 
-    await check_roles(ctx.author, current_points)
+    save_json(POINTS_FILE, points)
 
-# --- Admin command to reset a user ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def reset(ctx, member: discord.Member):
     user_id = str(member.id)
-    user_points[user_id] = 0
-    daily_data[user_id] = None
-    save_points()
-    save_daily()
-    await ctx.send(f"🛠️ {ctx.author.mention} reset points and daily for {member.mention}.")
+    points[user_id] = 0
+    save_json(POINTS_FILE, points)
+    await ctx.send(f"🧹 {member.mention}’s points have been reset to 0 by {ctx.author.mention}.")
 
 @reset.error
 async def reset_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send(f"❌ {ctx.author.mention}, you need Administrator permissions to use this command.")
+        await ctx.send("🚫 You don’t have permission to use this command.")
 
-# --- Run Bot ---
-bot.run(TOKEN)
+@bot.command()
+async def leaderboard(ctx):
+    if not points:
+        await ctx.send("📉 Nobody has any points yet!")
+        return
+
+    sorted_points = sorted(points.items(), key=lambda x: x[1], reverse=True)
+    top10 = sorted_points[:10]
+
+    description = ""
+    for i, (user_id, score) in enumerate(top10, start=1):
+        user = await bot.fetch_user(int(user_id))
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}️⃣"
+        description += f"{medal} **{user.name}** — {score} points\n"
+
+    embed = discord.Embed(title="🏆 Leaderboard", description=description, color=discord.Color.gold())
+    await ctx.send(embed=embed)
+
+keep_alive()
+bot.run(os.getenv("DISCORD_TOKEN"))
+
 
