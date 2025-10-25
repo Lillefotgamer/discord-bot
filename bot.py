@@ -245,3 +245,4 @@ async def currentconfig(ctx):
     await ctx.respond(msg)
 
 bot.run(TOKEN)
+
