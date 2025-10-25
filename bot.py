@@ -1,198 +1,231 @@
 import discord
 from discord.ext import commands, tasks
-from discord.commands import slash_command, Option
-import json
-import os
-import random
-from datetime import datetime, timedelta
+import json, os, random, asyncio, datetime
 
-intents = discord.Intents.all()
-bot = commands.Bot(intents=intents)
-
-# File paths
+TOKEN = os.getenv("DISCORD_TOKEN")
+CONFIG_FILE = "config.json"
 POINTS_FILE = "points.json"
-DAILY_FILE = "daily.json"
-CONFIG_FILE = "server_config.json"
-TRIGGERS_FILE = "triggers.json"
 
-# Load or initialize JSON files
-def load_json(file_path, default={}):
-    try:
-        with open(file_path, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return default
+intents = discord.Intents.default()
+intents.messages = True
+intents.guilds = True
+intents.message_content = True
 
-def save_json(file_path, data):
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
-points = load_json(POINTS_FILE)
-daily = load_json(DAILY_FILE)
-server_config = load_json(CONFIG_FILE)
-triggers = load_json(TRIGGERS_FILE)
+# Load per-server configuration
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "r") as f:
+        config = json.load(f)
+else:
+    config = {}
 
-# Default server config
+# Load points
+if os.path.exists(POINTS_FILE):
+    with open(POINTS_FILE, "r") as f:
+        points = json.load(f)
+else:
+    points = {}
+
+def save_config():
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=4)
+
+def save_points():
+    with open(POINTS_FILE, "w") as f:
+        json.dump(points, f, indent=4)
+
 def get_server_config(guild_id):
-    if str(guild_id) not in server_config:
-        server_config[str(guild_id)] = {
+    guild_id = str(guild_id)
+    if guild_id not in config:
+        config[guild_id] = {
+            "channel_id": None,
             "daily_reward": 10,
             "daily_cooldown_hours": 24,
-            "gamble_win_chance": 50,
+            "gamble_win_chance": 0.5,
             "gamble_multiplier": 2,
-            "bot_name": None,
-            "bot_avatar": None,
-            "roles": {}
+            "add_triggers": [],
+            "remove_triggers": [],
+            "dm_message": "meow (i only work in specific channels.)",
+            "gamble_messages": {
+                "win": "🎉 You won! You gain {points} points! Total: **{total}**",
+                "lose": "😢 You lost! You lose {points} points! Total: **{total}**"
+            }
         }
-        save_json(CONFIG_FILE, server_config)
-    return server_config[str(guild_id)]
+    return config[guild_id]
 
-# Case-insensitive check for message triggers
-def check_trigger(msg_content, guild_id):
-    if str(guild_id) not in triggers:
-        return 0
-    for trigger in triggers[str(guild_id)]["positive"]:
-        if trigger.lower() in msg_content.lower():
-            return triggers[str(guild_id)]["positive"][trigger]
-    for trigger in triggers[str(guild_id)]["negative"]:
-        if trigger.lower() in msg_content.lower():
-            return triggers[str(guild_id)]["negative"][trigger]
-    return 0
+def ensure_user_points(guild_id, user_id):
+    guild_id = str(guild_id)
+    user_id = str(user_id)
+    if guild_id not in points:
+        points[guild_id] = {}
+    if user_id not in points[guild_id]:
+        points[guild_id][user_id] = 0
+    return points[guild_id][user_id]
 
-# Ensure user points exist
-def ensure_user_points(user_id):
-    if str(user_id) not in points:
-        points[str(user_id)] = 0
-        save_json(POINTS_FILE, points)
-
-# ------------------ SLASH COMMANDS ------------------
-
-@slash_command(description="Check your points")
-async def pointscheck(ctx):
-    ensure_user_points(ctx.author.id)
-    await ctx.respond(f"{ctx.author.mention}, you have **{points[str(ctx.author.id)]}** points!")
-
-@slash_command(description="Claim your daily reward")
-async def daily(ctx):
-    cfg = get_server_config(ctx.guild.id)
-    user_id = str(ctx.author.id)
-    now = datetime.utcnow()
-    last_claim = daily.get(user_id)
-    if last_claim:
-        last_time = datetime.strptime(last_claim, "%Y-%m-%d %H:%M:%S")
-        diff = now - last_time
-        if diff < timedelta(hours=cfg["daily_cooldown_hours"]):
-            remaining = timedelta(hours=cfg["daily_cooldown_hours"]) - diff
-            hours, remainder = divmod(int(remaining.total_seconds()), 3600)
-            minutes, _ = divmod(remainder, 60)
-            await ctx.respond(f"Daily already claimed! Try again in {hours}h {minutes}m.")
-            return
-    ensure_user_points(ctx.author.id)
-    points[str(ctx.author.id)] += cfg["daily_reward"]
-    daily[user_id] = now.strftime("%Y-%m-%d %H:%M:%S")
-    save_json(POINTS_FILE, points)
-    save_json(DAILY_FILE, daily)
-    await ctx.respond(f"{ctx.author.mention}, you claimed your daily reward of {cfg['daily_reward']} points! Total: **{points[str(ctx.author.id)]}**")
-
-@slash_command(description="Gamble points")
-async def gamble(ctx, amount: Option(int, "Amount to gamble")):
-    cfg = get_server_config(ctx.guild.id)
-    ensure_user_points(ctx.author.id)
-    user_points = points[str(ctx.author.id)]
-    if amount > user_points or amount <= 0:
-        await ctx.respond(f"Invalid amount! You have {user_points} points.")
-        return
-    roll = random.randint(1, 100)
-    if roll <= cfg["gamble_win_chance"]:
-        won = amount * cfg["gamble_multiplier"] - amount
-        points[str(ctx.author.id)] += won
-        await ctx.respond(f"🎉 You won! You gain **{won}** points! Total: **{points[str(ctx.author.id)]}**")
-    else:
-        points[str(ctx.author.id)] -= amount
-        await ctx.respond(f"😢 You lost {amount} points. Total: **{points[str(ctx.author.id)]}**")
-    save_json(POINTS_FILE, points)
-
-@slash_command(description="Admin: Reset a user's points")
-async def reset(ctx, member: Option(discord.Member, "User to reset")):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.respond("You must be an administrator to use this command.")
-        return
-    points[str(member.id)] = 0
-    save_json(POINTS_FILE, points)
-    await ctx.respond(f"{member.mention}'s points have been reset to 0.")
-
-@slash_command(description="Admin: Set server bot name and avatar")
-async def setbot(ctx, name: Option(str, "Bot nickname (server only)", required=False), avatar_url: Option(str, "Bot avatar URL (server only)", required=False)):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.respond("You must be an administrator to use this command.")
-        return
-    cfg = get_server_config(ctx.guild.id)
-    if name:
-        cfg["bot_name"] = name
-        await ctx.guild.me.edit(nick=name)
-    if avatar_url:
-        cfg["bot_avatar"] = avatar_url
-    save_json(CONFIG_FILE, server_config)
-    await ctx.respond("Bot settings updated for this server.")
-
-@slash_command(description="Admin: Add a trigger message")
-async def addtrigger(ctx, trigger: Option(str, "Message to trigger points"), points_val: Option(int, "Points to give/lose"), positive: Option(bool, "Positive or negative points")):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.respond("Administrator only.")
-        return
-    gid = str(ctx.guild.id)
-    if gid not in triggers:
-        triggers[gid] = {"positive": {}, "negative": {}}
-    if positive:
-        triggers[gid]["positive"][trigger] = points_val
-    else:
-        triggers[gid]["negative"][trigger] = points_val
-    save_json(TRIGGERS_FILE, triggers)
-    await ctx.respond(f"Trigger added! {'Positive' if positive else 'Negative'}: '{trigger}' => {points_val} points.")
-
-@slash_command(description="Admin: Remove a trigger message")
-async def removetrigger(ctx, trigger: Option(str, "Trigger message to remove")):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.respond("Administrator only.")
-        return
-    gid = str(ctx.guild.id)
-    removed = False
-    for category in ["positive", "negative"]:
-        if gid in triggers and trigger in triggers[gid][category]:
-            del triggers[gid][category][trigger]
-            removed = True
-    save_json(TRIGGERS_FILE, triggers)
-    if removed:
-        await ctx.respond(f"Trigger '{trigger}' removed.")
-    else:
-        await ctx.respond(f"Trigger '{trigger}' not found.")
-
-@slash_command(description="Admin: Show current server configuration")
-async def currentconfig(ctx):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.respond("Administrator only.")
-        return
-    cfg = get_server_config(ctx.guild.id)
-    embed = discord.Embed(title="Server Configuration", color=discord.Color.blue())
-    for key, value in cfg.items():
-        if key != "roles":
-            embed.add_field(name=key, value=value, inline=False)
-    await ctx.respond(embed=embed)
-
-# ------------------ MESSAGE EVENT ------------------
+@bot.event
+async def on_ready():
+    print(f"{bot.user} is online!")
+    await bot.tree.sync()
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    guild_id = message.guild.id
-    pts = check_trigger(message.content, guild_id)
-    if pts != 0:
-        ensure_user_points(message.author.id)
-        points[str(message.author.id)] += pts
-        save_json(POINTS_FILE, points)
-        await message.channel.send(f"{message.author.mention} earned {pts} points! Total: **{points[str(message.author.id)]}**")
+
+    # DM handling
+    if isinstance(message.channel, discord.DMChannel):
+        await message.channel.send("I only work inside servers.")
+        return
+
+    guild_id = str(message.guild.id)
+    server_config = get_server_config(message.guild.id)
+    if server_config["channel_id"] and message.channel.id != server_config["channel_id"]:
+        return  # silent outside set channel
+
+    content = message.content.lower()
+    user_id = str(message.author.id)
+
+    # Check add triggers
+    for trig in server_config["add_triggers"]:
+        if trig.lower() in content:
+            points[guild_id][user_id] = ensure_user_points(message.guild.id, user_id) + 1
+            save_points()
+            await message.channel.send(f"{message.author.mention}, you gained 1 point! Total: **{points[guild_id][user_id]}**")
+            break
+
+    # Check remove triggers
+    for trig in server_config["remove_triggers"]:
+        if trig.lower() in content:
+            points[guild_id][user_id] = ensure_user_points(message.guild.id, user_id) - 1
+            save_points()
+            await message.channel.send(f"{message.author.mention}, you lost 1 point! Total: **{points[guild_id][user_id]}**")
+            break
+
     await bot.process_commands(message)
 
-# ------------------ RUN ------------------
-bot.run(os.getenv("DISCORD_TOKEN"))
+# ----- Slash Commands -----
+@bot.tree.command(description="Claim your daily reward")
+async def daily(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    user_id = str(interaction.user.id)
+    server_config = get_server_config(interaction.guild.id)
+
+    if server_config["channel_id"] and interaction.channel.id != server_config["channel_id"]:
+        await interaction.response.send_message(server_config["dm_message"], ephemeral=True)
+        return
+
+    user_points = ensure_user_points(interaction.guild.id, user_id)
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    cooldown_key = f"{user_id}_{today}"
+
+    if "daily_claimed" not in server_config:
+        server_config["daily_claimed"] = {}
+
+    claimed = server_config["daily_claimed"].get(cooldown_key, 0)
+    hours_passed = claimed
+
+    if claimed:
+        remaining = server_config["daily_cooldown_hours"] - hours_passed
+        await interaction.response.send_message(f"You already claimed daily. Wait {remaining} hours.", ephemeral=True)
+        return
+
+    user_points += server_config["daily_reward"]
+    ensure_user_points(interaction.guild.id, user_id)
+    points[guild_id][user_id] = user_points
+    save_points()
+    server_config["daily_claimed"][cooldown_key] = server_config["daily_cooldown_hours"]
+    save_config()
+    await interaction.response.send_message(f"{interaction.user.mention}, you claimed your daily reward of {server_config['daily_reward']} points! Total: **{user_points}**")
+
+@bot.tree.command(description="Gamble your points")
+async def gamble(interaction: discord.Interaction, amount: int):
+    guild_id = str(interaction.guild.id)
+    user_id = str(interaction.user.id)
+    server_config = get_server_config(interaction.guild.id)
+
+    if server_config["channel_id"] and interaction.channel.id != server_config["channel_id"]:
+        await interaction.response.send_message(server_config["dm_message"], ephemeral=True)
+        return
+
+    user_points = ensure_user_points(interaction.guild.id, user_id)
+    if amount > user_points:
+        await interaction.response.send_message("You don't have enough points.", ephemeral=True)
+        return
+
+    win = random.random() < server_config["gamble_win_chance"]
+    if win:
+        gained = amount * server_config["gamble_multiplier"]
+        points[guild_id][user_id] += gained
+        await interaction.response.send_message(server_config["gamble_messages"]["win"].format(points=gained, total=points[guild_id][user_id]))
+    else:
+        points[guild_id][user_id] -= amount
+        await interaction.response.send_message(server_config["gamble_messages"]["lose"].format(points=amount, total=points[guild_id][user_id]))
+    save_points()
+
+# ----- Admin Commands -----
+def admin_check(interaction: discord.Interaction):
+    return interaction.user.guild_permissions.administrator
+
+@bot.tree.command(description="Reset a user's points")
+async def reset(interaction: discord.Interaction, member: discord.Member):
+    if not admin_check(interaction):
+        await interaction.response.send_message("You must be an admin.", ephemeral=True)
+        return
+    guild_id = str(interaction.guild.id)
+    user_id = str(member.id)
+    points[guild_id][user_id] = 0
+    save_points()
+    await interaction.response.send_message(f"{member.mention}'s points have been reset.")
+
+@bot.tree.command(description="Set configuration for the server")
+async def setconfig(interaction: discord.Interaction, option: str, value: str):
+    if not admin_check(interaction):
+        await interaction.response.send_message("You must be an admin.", ephemeral=True)
+        return
+    guild_id = str(interaction.guild.id)
+    server_config = get_server_config(interaction.guild.id)
+    if option not in server_config:
+        await interaction.response.send_message("Invalid option.", ephemeral=True)
+        return
+    if option in ["channel_id", "daily_reward", "daily_cooldown_hours"]:
+        value = int(value)
+    server_config[option] = value
+    save_config()
+    await interaction.response.send_message(f"Config {option} updated to {value}.")
+
+@bot.tree.command(description="Add a message trigger for adding points")
+async def addtrigger(interaction: discord.Interaction, message: str):
+    if not admin_check(interaction):
+        await interaction.response.send_message("You must be an admin.", ephemeral=True)
+        return
+    server_config = get_server_config(interaction.guild.id)
+    server_config["add_triggers"].append(message)
+    save_config()
+    await interaction.response.send_message(f"Added positive trigger: `{message}`")
+
+@bot.tree.command(description="Remove a message trigger")
+async def removetrigger(interaction: discord.Interaction, message: str):
+    if not admin_check(interaction):
+        await interaction.response.send_message("You must be an admin.", ephemeral=True)
+        return
+    server_config = get_server_config(interaction.guild.id)
+    if message in server_config["add_triggers"]:
+        server_config["add_triggers"].remove(message)
+        save_config()
+        await interaction.response.send_message(f"Removed trigger: `{message}`")
+    else:
+        await interaction.response.send_message("Trigger not found.")
+
+@bot.tree.command(description="Show current server configurations")
+async def currentconfigurations(interaction: discord.Interaction):
+    if not admin_check(interaction):
+        await interaction.response.send_message("You must be an admin.", ephemeral=True)
+        return
+    server_config = get_server_config(interaction.guild.id)
+    embed = discord.Embed(title="Server Configurations", color=discord.Color.blue())
+    for k,v in server_config.items():
+        embed.add_field(name=k, value=str(v), inline=False)
+    await interaction.response.send_message(embed=embed)
+
+bot.run(TOKEN)
