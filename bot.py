@@ -320,19 +320,31 @@ async def removetrigger_cmd(interaction: discord.Interaction, message: str):
         await interaction.response.send_message(f"Removed trigger matching '{message}'.", ephemeral=True)
 
 # /setchannel (admin)
-@bot.tree.command(name="setchannel", description="Set the single channel where the bot will operate (admin only)")
-@app_commands.describe(channel_id="Channel ID number (paste the ID)")
-async def setchannel_cmd(interaction: discord.Interaction, channel_id: int):
+@bot.tree.command(name="setchannel", description="Set the channel where the bot will operate (admin only)")
+@app_commands.describe(channel_id="Enter the numeric ID of the channel")
+async def setchannel(interaction: discord.Interaction, channel_id: str):
     if interaction.guild is None:
         return
     if not is_admin(interaction):
-        await interaction.response.send_message("Administrator only.", ephemeral=True)
+        await interaction.response.send_message("❌ Only administrators can use this command.", ephemeral=True)
         return
+
+    # Validate the channel ID
+    if not channel_id.isdigit():
+        await interaction.response.send_message("❌ Please enter a valid numeric channel ID.", ephemeral=True)
+        return
+
+    channel = interaction.guild.get_channel(int(channel_id))
+    if channel is None:
+        await interaction.response.send_message("❌ Channel not found. Make sure the ID is correct.", ephemeral=True)
+        return
+
     cfg = get_guild_config(interaction.guild.id)
-    cfg["CHANNEL_ID"] = int(channel_id)
+    cfg["CHANNEL_ID"] = channel.id
     config_data[str(interaction.guild.id)] = cfg
     save_json(CONFIG_FILE, config_data)
-    await interaction.response.send_message(f"Bot channel set to <#{channel_id}> for this server.", ephemeral=True)
+
+    await interaction.response.send_message(f"✅ Bot channel set to {channel.mention} for this server.", ephemeral=True)
 
 # /setconfig (admin) for numeric options
 @bot.tree.command(name="setconfig", description="Set numeric configuration option (admin only)")
@@ -470,3 +482,4 @@ if __name__ == "__main__":
         print("ERROR: DISCORD_TOKEN environment variable not set.")
         raise SystemExit(1)
     bot.run(TOKEN)
+
